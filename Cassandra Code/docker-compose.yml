@@ -1,0 +1,21 @@
+version: "3.9"
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=256M
+      - CASSANDRA_START_RPC=true
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESC KEYSPACES' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+
+volumes:
+  cassandra-data:

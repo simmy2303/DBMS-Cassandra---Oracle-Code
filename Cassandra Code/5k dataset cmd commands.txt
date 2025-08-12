@@ -1,0 +1,644 @@
+Windows PowerShell
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Install the latest PowerShell for new features and improvements! https://aka.ms/PSWindows
+
+PS C:\Users\User> CD CASSANDRA
+PS C:\Users\User\CASSANDRA> Get-Content .\employees_5k.csv -TotalCount 1
+EmployeeID,FirstName,LastName,PhoneNumber,Email,Department,Position,HireDate,SalaryRM
+PS C:\Users\User\CASSANDRA> # read header into a list
+PS C:\Users\User\CASSANDRA> $csv = 'employees_5k.csv'
+PS C:\Users\User\CASSANDRA> $rawHeader = Get-Content ".\${csv}" -TotalCount 1
+PS C:\Users\User\CASSANDRA> $cols = $rawHeader -split ',' | ForEach-Object { $_.Trim() }
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # sanitize to valid CQL identifiers (lowercase, underscores)
+PS C:\Users\User\CASSANDRA> $san = $cols | ForEach-Object { ($_ -replace '[^A-Za-z0-9_]', '_').ToLower() }
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $keyspace = 'hr'
+PS C:\Users\User\CASSANDRA> $table    = 'employees_cas'
+PS C:\Users\User\CASSANDRA> $firstCol = $san[0]
+PS C:\Users\User\CASSANDRA> $colsCql  = ($san | ForEach-Object { "  $_ text" }) -join ",`n"
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $cql = @"
+>> CREATE KEYSPACE IF NOT EXISTS $keyspace
+>>   WITH replication = {'class':'SimpleStrategy','replication_factor':1};
+>>
+>> DROP TABLE IF EXISTS $keyspace.$table;
+>>
+>> CREATE TABLE IF NOT EXISTS $keyspace.$table (
+>> $colsCql,
+>>   PRIMARY KEY ($firstCol)
+>> );
+>> "@
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e $cql
+^[[3~^[[3~^[[3~
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "DESCRIBE TABLE $keyspace.$table;"
+
+CREATE TABLE hr.employees_cas (
+    employeeid text PRIMARY KEY,
+    department text,
+    email text,
+    firstname text,
+    hiredate text,
+    lastname text,
+    phonenumber text,
+    position text,
+    salaryrm text
+) WITH additional_write_policy = '99p'
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}
+    AND cdc = false
+    AND comment = ''
+    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}
+    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}
+    AND memtable = 'default'
+    AND crc_check_chance = 1.0
+    AND default_time_to_live = 0
+    AND extensions = {}
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND read_repair = 'BLOCKING'
+    AND speculative_retry = '99p';
+PS C:\Users\User\CASSANDRA> docker cp ".\${csv}" cassandra:/tmp/${csv}
+Successfully copied 515kB to cassandra:/tmp/employees_5k.csv
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # IMPORTANT: list the original header namesin the COPY column list (order matters)
+PS C:\Users\User\CASSANDRA> $colList = ($cols -join ',')
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $load = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table ($colList) FROM '/tmp/${csv}' WITH HEADER=TRUE AND DELIMITER=',';"
+>> }
+PS C:\Users\User\CASSANDRA> "Loaded $csv in $($load.TotalMilliseconds) ms" | Write-Host
+Loaded employees_5k.csv in 1724.2544 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "SELECT count(*) FROM $keyspace.$table;"
+
+ count
+-------
+  5000
+
+(1 rows)
+
+Warnings :
+Aggregation query used without partition key
+
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "SELECT * FROM $keyspace.$table LIMIT 3;"
+
+ employeeid | department  | email                      | firstname | hiredate   | lastname | phonenumber      | position          | salaryrm
+------------+-------------+----------------------------+-----------+------------+----------+------------------+-------------------+----------
+      52635 | Engineering |   bella.xie2635@corp.local |     Bella | 2024-05-21 |      Xie | +60 19-8672 1880 | Software Engineer |     9660
+      52869 |       Sales | arjun.abdullah2869@demo.co |     Arjun | 2024-04-09 | Abdullah | +60 12-1170 6237 |   Account Manager |    25250
+      51594 |   Logistics | noah.ismail1594@corp.local |      Noah | 2024-03-02 |   Ismail | +60 11-2128 7689 |    Supply Planner |    11730
+
+(3 rows)
+PS C:\Users\User\CASSANDRA> $baseline = "baseline_${csv}"
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${baseline}' WITH HEADER=TRUE;"
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   21507 rows/s; Avg. rate:   21506 rows/s
+5000 rows exported to 1 files in 0.324 seconds.
+PS C:\Users\User\CASSANDRA> docker cp cassandra:/tmp/${baseline} .
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA> (Get-Content ".\${baseline}" -TotalCount 2)| Write-Host   # show header + 1st row
+employeeid,department,email,firstname,hiredate,lastname,phonenumber,position,salaryrm
+50726,Marketing,cheng.zulkifli726@demo.co,Cheng,2022-07-23,Zulkifli,+6012-7039 4206,Marketing Executive,8300
+PS C:\Users\User\CASSANDRA> $firstHeader = $cols[0]          # "EmployeeID"
+PS C:\Users\User\CASSANDRA> $id1 = (Import-Csv ".\${baseline}" | Select-Object -First 1)."${firstHeader}"
+PS C:\Users\User\CASSANDRA> "First header: $firstHeader ; Picked ID: $id1" | Write-Host
+First header: EmployeeID ; Picked ID: 50726
+PS C:\Users\User\CASSANDRA> $tamper = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e "DELETE FROM $keyspace.$table WHERE $($firstHeader) = '$id1';"
+>> }
+PS C:\Users\User\CASSANDRA> "Tamper DELETE 1: $($tamper.TotalMilliseconds) ms" | Write-Host
+Tamper DELETE 1: 763.3648 ms
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "SELECT count(*) FROM $keyspace.$table;"
+
+ count
+-------
+  4999
+
+(1 rows)
+
+Warnings :
+Aggregation query used without partition key
+
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;"
+>> }
+PS C:\Users\User\CASSANDRA> "Recovery: $($rec.TotalMilliseconds) ms" | Write-Host
+Recovery: 1576.3122 ms
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "SELECT count(*) FROM $keyspace.$table;"
+
+ count
+-------
+  5000
+
+(1 rows)
+
+Warnings :
+Aggregation query used without partition key
+
+PS C:\Users\User\CASSANDRA> $afterRec = "afterrec_delete1_${csv}"
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterRec}' WITH HEADER=TRUE;"
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   49141 rows/s; Avg. rate:   17351 rows/s
+5000 rows exported to 1 files in 0.382 seconds.
+PS C:\Users\User\CASSANDRA> docker cp cassandra:/tmp/${afterRec} .
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterRec}" delete "$id1"
+Rows tampered: 1
+Rows recovered (present again): 1
+Rows fully correct (complete): 1
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> $ids20 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 20
+PS C:\Users\User\CASSANDRA> $ids50 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 50
+PS C:\Users\User\CASSANDRA> $ids20s = ($ids20 -join ",")
+PS C:\Users\User\CASSANDRA> $ids50s = ($ids50 -join ",")
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # delete 20
+PS C:\Users\User\CASSANDRA> $t = Measure-Command { docker exec -it cassandra cqlsh -e "DELETE FROM $keyspace.$table WHERE $firstHeader IN ($ids20s);" }
+PS C:\Users\User\CASSANDRA> "Tamper DELETE 20: $($t.TotalMilliseconds) ms" | Write-Host
+Tamper DELETE 20: 746.3192 ms
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }
+PS C:\Users\User\CASSANDRA> "Recovery 20: $($rec.TotalMilliseconds) ms"| Write-Host
+Recovery 20: 1485.138 ms
+PS C:\Users\User\CASSANDRA> $afterR = "afterrec_delete20_${csv}"; docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}'WITH HEADER=TRUE;"; docker cp cassandra:/tmp/${afterR} .
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   27976 rows/s; Avg. rate:   27975 rows/s
+5000 rows exported to 1 files in 0.254 seconds.
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR}" delete "$ids20s"
+Rows tampered: 20
+Rows recovered (present again): 20
+Rows fully correct (complete): 20
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # delete 50 — same pattern, use $ids50s
+PS C:\Users\User\CASSANDRA> $ids20 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 20 $ids50 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 50 $ids20s = ($ids20 -join ",") $ids50s = ($ids50 -join ",") # delete 20 $t = Measure-Command { docker exec -it cassandra cqlsh -e "DELETE FROM $keyspace.$table WHERE $firstHeader IN ($ids20s);" } "Tamper DELETE 20: $($t.TotalMilliseconds) ms" | Write-Host docker cp ".\${baseline}" cassandra:/tmp/${baseline} $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }"Recovery 20: $($rec.TotalMilliseconds) ms" | Write-Host $afterR = "afterrec_delete20_${csv}"; docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}' WITH HEADER=TRUE;"; docker cp cassandra:/tmp/${afterR} . python metrics_eval.py ".\${baseline}" ".\${afterR}" delete "$ids50s" # delete 50 — same pattern, use $ids50s^C
+PS C:\Users\User\CASSANDRA> $ids20 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 20
+PS C:\Users\User\CASSANDRA> $ids50 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 50
+PS C:\Users\User\CASSANDRA> $ids20s = ($ids20 -join ",")
+PS C:\Users\User\CASSANDRA> $ids50s = ($ids50 -join ",")
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # delete 20
+PS C:\Users\User\CASSANDRA> $t = Measure-Command { docker exec -it cassandra cqlsh -e "DELETE FROM $keyspace.$table WHERE $firstHeader IN ($ids20s);" }
+PS C:\Users\User\CASSANDRA> "Tamper DELETE 20: $($t.TotalMilliseconds) ms" | Write-Host
+Tamper DELETE 20: 2009.7313 ms
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }
+PS C:\Users\User\CASSANDRA> "Recovery 20: $($rec.TotalMilliseconds) ms"| Write-Host
+Recovery 20: 2525.3442 ms
+PS C:\Users\User\CASSANDRA> $afterR = "afterrec_delete20_${csv}"; docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}'WITH HEADER=TRUE;"; docker cp cassandra:/tmp/${afterR} .
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   34248 rows/s; Avg. rate:   16796 rows/s
+5000 rows exported to 1 files in 0.402 seconds.
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR}" delete "$ids50s"
+Rows tampered: 50
+Rows recovered (present again): 50
+Rows fully correct (complete): 50
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # delete 50 — same pattern, use $ids50s
+PS C:\Users\User\CASSANDRA> $mod5  = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 5
+PS C:\Users\User\CASSANDRA> $mod5s = ($mod5 -join ",")
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # build 5 UPDATE statements (+100)
+PS C:\Users\User\CASSANDRA> $stmts = ($mod5 | ForEach-Object { "UPDATE $keyspace.$table SET SalaryRM = CAST(CAST(SalaryRM AS decimal)+100 AS text) WHERE $firstHeader = '$($_)';" }) -join " "
+PS C:\Users\User\CASSANDRA> # note: since we stored all TEXT, we do a CAST trick; if you want, keep SalaryRM as decimal in schema and skip casts.
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $t = Measure-Command { docker exec -it cassandra cqlsh -e $stmts }
+PS C:\Users\User\CASSANDRA> "Tamper MODIFY 5: $($t.TotalMilliseconds) ms" | Write-Host
+Tamper MODIFY 5: 796.8213 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }
+PS C:\Users\User\CASSANDRA> "Recovery modify: $($rec.TotalMilliseconds)ms" | Write-Host
+Recovery modify: 1687.3714 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $afterR = "afterrec_modify5_${csv}"; dockerexec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}' WITH HEADER=TRUE;"; docker cp cassandra:/tmp/${afterR} .
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   31467 rows/s; Avg. rate:   31465 rows/s
+5000 rows exported to 1 files in 0.230 seconds.
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR}" modify "$mod5s"
+Rows tampered: 5
+Rows recovered (present again): 5
+Rows fully correct (complete): 5
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> # n1: one fake row
+PS C:\Users\User\CASSANDRA> $t = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e "INSERT INTO $keyspace.$table ($($cols -join ',')) VALUES ('900001','Fake','User','000900001','fake900001@example.com','Fraud','Hacker','2020-01-01','1.23');"
+>> }
+PS C:\Users\User\CASSANDRA> "Tamper INSERT 1: $($t.TotalMilliseconds) ms" | Write-Host
+Tamper INSERT 1: 738.6432 ms
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }
+PS C:\Users\User\CASSANDRA> "Recovery insert1: $($rec.TotalMilliseconds) ms" | Write-Host
+Recovery insert1: 1425.8999 ms
+PS C:\Users\User\CASSANDRA> $afterR = "afterrec_insert1_${csv}"; dockerexec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}' WITH HEADER=TRUE;"; docker cp cassandra:/tmp/${afterR} .
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   32081 rows/s; Avg. rate:   32079 rows/s
+5000 rows exported to 1 files in 0.229 seconds.
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR}" insert "900001"
+Rows tampered: 1
+Rows recovered (present again): 1
+Rows fully correct (complete): 1
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> # Build 20 fake INSERT statements
+PS C:\Users\User\CASSANDRA> $ids20 = 900101..900120
+PS C:\Users\User\CASSANDRA> $insert20 = ($ids20 | ForEach-Object {
+>>   "INSERT INTO hr.employees_cas (EmployeeID,FirstName,LastName,PhoneNumber,Email,Department,Position,HireDate,SalaryRM) " +
+>>   "VALUES ('$_','Fake','User','000$_','fake$_@example.com','Fraud','Hacker','2020-01-01','1.23');"
+>> }) -join " "
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Tamper
+PS C:\Users\User\CASSANDRA> $t20 = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e $insert20
+>> }
+PS C:\Users\User\CASSANDRA> "Tamper INSERT 20: $($t20.TotalMilliseconds) ms" | Write-Host
+Tamper INSERT 20: 1365.8449 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Recover from baseline
+PS C:\Users\User\CASSANDRA> $baseline = "baseline_employees_1k.csv"
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 105kB to cassandra:/tmp/baseline_employees_1k.csv
+PS C:\Users\User\CASSANDRA> $rec20 = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e "TRUNCATE hr.employees_cas; COPY hr.employees_cas FROM '/tmp/${baseline}' WITH HEADER=TRUE;"
+>> }
+PS C:\Users\User\CASSANDRA> "Recovery insert20: $($rec20.TotalMilliseconds) ms" | Write-Host
+Recovery insert20: 1278.9501 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Export after recovery
+PS C:\Users\User\CASSANDRA> $afterR20 = "afterrec_insert20_employees_1k.csv"
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "COPY hr.employees_cas TO '/tmp/${afterR20}' WITH HEADER=TRUE;"
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 1000 rows; Rate:    9264 rows/s; Avg. rate:    9263 rows/s
+1000 rows exported to 1 files in 0.177 seconds.
+PS C:\Users\User\CASSANDRA> docker cp cassandra:/tmp/${afterR20} .
+Successfully copied 105kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Metrics
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR20}" insert "$($ids20 -join ',')"
+Rows tampered: 20
+Rows recovered (present again): 20
+Rows fully correct (complete): 20
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> # Build 20 fake INSERT statements
+PS C:\Users\User\CASSANDRA> $ids20 = 900101..900120
+PS C:\Users\User\CASSANDRA> $insert20 = ($ids20 | ForEach-Object {
+>>   "INSERT INTO hr.employees_cas (EmployeeID,FirstName,LastName,PhoneNumber,Email,Department,Position,HireDate,SalaryRM) " +
+>>   "VALUES ('$_','Fake','User','000$_','fake$_@example.com','Fraud','Hacker','2020-01-01','1.23');"
+>> }) -join " "
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Tamper
+PS C:\Users\User\CASSANDRA> $t20 = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e $insert20
+>> }
+PS C:\Users\User\CASSANDRA> "Tamper INSERT 20: $($t20.TotalMilliseconds) ms" | Write-Host
+Tamper INSERT 20: 818.5618 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Recover from baseline
+PS C:\Users\User\CASSANDRA> $baseline = "baseline_employees_1k.csv"
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 105kB to cassandra:/tmp/baseline_employees_1k.csv
+PS C:\Users\User\CASSANDRA> $rec20 = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e "TRUNCATE hr.employees_cas; COPY hr.employees_cas FROM '/tmp/${baseline}' WITH HEADER=TRUE;"
+>> }
+PS C:\Users\User\CASSANDRA> "Recovery insert20: $($rec20.TotalMilliseconds) ms" | Write-Host
+Recovery insert20: 1290.4552 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Export after recovery
+PS C:\Users\User\CASSANDRA> $afterR20 = "afterrec_insert20_employees_5k.csv"
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "COPY hr.employees_cas TO '/tmp/${afterR20}' WITH HEADER=TRUE;"
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 1000 rows; Rate:    6813 rows/s; Avg. rate:    6811 rows/s
+1000 rows exported to 1 files in 0.209 seconds.
+PS C:\Users\User\CASSANDRA> docker cp cassandra:/tmp/${afterR20} .
+Successfully copied 105kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Metrics
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR20}" insert "$($ids20 -join ',')"
+Rows tampered: 20
+Rows recovered (present again): 20
+Rows fully correct (complete): 20
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> # Build 20 fake INSERT statements
+PS C:\Users\User\CASSANDRA> $ids20 = 900101..900120
+PS C:\Users\User\CASSANDRA> $insert20 = ($ids20 | ForEach-Object {
+>>   "INSERT INTO hr.employees_cas (EmployeeID,FirstName,LastName,PhoneNumber,Email,Department,Position,HireDate,SalaryRM) " +
+>>   "VALUES ('$_','Fake','User','000$_','fake$_@example.com','Fraud','Hacker','2020-01-01','1.23');"
+>> }) -join " "
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Tamper
+PS C:\Users\User\CASSANDRA> $t20 = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e $insert20
+>> }
+PS C:\Users\User\CASSANDRA> "Tamper INSERT 20: $($t20.TotalMilliseconds) ms" | Write-Host
+Tamper INSERT 20: 764.8589 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Recover from baseline
+PS C:\Users\User\CASSANDRA> $baseline = "baseline_employees_5k.csv"
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec20 = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e "TRUNCATE hr.employees_cas; COPY hr.employees_cas FROM '/tmp/${baseline}' WITH HEADER=TRUE;"
+>> }
+PS C:\Users\User\CASSANDRA> "Recovery insert20: $($rec20.TotalMilliseconds) ms" | Write-Host
+Recovery insert20: 1386.9162 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Export after recovery
+PS C:\Users\User\CASSANDRA> $afterR20 = "afterrec_insert20_employees_5k.csv"
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "COPY hr.employees_cas TO '/tmp/${afterR20}' WITH HEADER=TRUE;"
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   27923 rows/s; Avg. rate:   27921 rows/s
+5000 rows exported to 1 files in 0.236 seconds.
+PS C:\Users\User\CASSANDRA> docker cp cassandra:/tmp/${afterR20} .
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # Metrics
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR20}" insert "$($ids20 -join ',')"
+Rows tampered: 20
+Rows recovered (present again): 20
+Rows fully correct (complete): 20
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> $ids50 = 900201..900250
+PS C:\Users\User\CASSANDRA> $insert50 = ($ids50 | ForEach-Object {
+>>   "INSERT INTO hr.employees_cas (EmployeeID,FirstName,LastName,PhoneNumber,Email,Department,Position,HireDate,SalaryRM) " +
+>>   "VALUES ('$_','Fake','User','000$_','fake$_@example.com','Fraud','Hacker','2020-01-01','1.23');"
+>> }) -join " "
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $t50 = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e $insert50
+>> }
+PS C:\Users\User\CASSANDRA> "Tamper INSERT 50: $($t50.TotalMilliseconds) ms" | Write-Host
+Tamper INSERT 50: 846.5664 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $baseline = "baseline_employees_5k.csv"
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec50 = Measure-Command {
+>>   docker exec -it cassandra cqlsh -e "TRUNCATE hr.employees_cas; COPY hr.employees_cas FROM '/tmp/${baseline}' WITH HEADER=TRUE;"
+>> }
+PS C:\Users\User\CASSANDRA> "Recovery insert50: $($rec50.TotalMilliseconds) ms" | Write-Host
+Recovery insert50: 1431.793 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $afterR50 = "afterrec_insert50_employees_5k.csv"
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "COPY hr.employees_cas TO '/tmp/${afterR50}' WITH HEADER=TRUE;"
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   34879 rows/s; Avg. rate:   34878 rows/s
+5000 rows exported to 1 files in 0.202 seconds.
+PS C:\Users\User\CASSANDRA> docker cp cassandra:/tmp/${afterR50} .
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR50}" insert "$($ids50 -join ',')"
+Rows tampered: 50
+Rows recovered (present again): 50
+Rows fully correct (complete): 50
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> $ids20 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 20
+PS C:\Users\User\CASSANDRA> $ids50 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 50
+PS C:\Users\User\CASSANDRA> $ids20s = ($ids20 -join ",")
+PS C:\Users\User\CASSANDRA> $ids50s = ($ids50 -join ",")
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # delete 20
+PS C:\Users\User\CASSANDRA> $t = Measure-Command { docker exec -it cassandra cqlsh -e "DELETE FROM $keyspace.$table WHERE $firstHeader IN ($ids20s);" }
+PS C:\Users\User\CASSANDRA> "Tamper DELETE 20: $($t.TotalMilliseconds) ms" | Write-Host
+Tamper DELETE 20: 1890.9681 ms
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }
+PS C:\Users\User\CASSANDRA> "Recovery 20: $($rec.TotalMilliseconds) ms"| Write-Host
+Recovery 20: 2316.5109 ms
+PS C:\Users\User\CASSANDRA> $afterR = "afterrec_delete20_${csv}"; docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}'WITH HEADER=TRUE;"; docker cp cassandra:/tmp/${afterR} .
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   37011 rows/s; Avg. rate:   16638 rows/s
+5000 rows exported to 1 files in 0.390 seconds.
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR}" delete "$ids50s"
+Rows tampered: 50
+Rows recovered (present again): 50
+Rows fully correct (complete): 50
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> $ids20 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 20
+PS C:\Users\User\CASSANDRA> $ids50 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 50
+PS C:\Users\User\CASSANDRA> $ids20s = ($ids20 -join ",")
+PS C:\Users\User\CASSANDRA> $ids50s = ($ids50 -join ",")
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # delete 20
+PS C:\Users\User\CASSANDRA> $t = Measure-Command { docker exec -it cassandra cqlsh -e "DELETE FROM $keyspace.$table WHERE $firstHeader IN ($ids20s);" }
+PS C:\Users\User\CASSANDRA> "Tamper DELETE 50: $($t.TotalMilliseconds) ms" | Write-Host
+Tamper DELETE 50: 1408.0888 ms
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }
+PS C:\Users\User\CASSANDRA> "Recovery 50: $($rec.TotalMilliseconds) ms"| Write-Host
+Recovery 50: 1693.0335 ms
+PS C:\Users\User\CASSANDRA> $afterR = "afterrec_delete20_${csv}"; docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}'WITH HEADER=TRUE;"; docker cp cassandra:/tmp/${afterR} .
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   30934 rows/s; Avg. rate:   30931 rows/s
+5000 rows exported to 1 files in 0.230 seconds.
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR}" delete "$ids50s"
+Rows tampered: 50
+Rows recovered (present again): 50
+Rows fully correct (complete): 50
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # delete 50 — same pattern, use $ids50sDO
+PS C:\Users\User\CASSANDRA> # SELECT IDs from baseline
+PS C:\Users\User\CASSANDRA> $ids20 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 20
+PS C:\Users\User\CASSANDRA> $ids50 = (Import-Csv ".\${baseline}")."$firstHeader" | Select-Object -First 50
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # For CQL
+PS C:\Users\User\CASSANDRA> $ids20s = ($ids20 | ForEach-Object { "'$_'"}) -join ","
+PS C:\Users\User\CASSANDRA> $ids50s = ($ids50 | ForEach-Object { "'$_'"}) -join ","
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # For metrics
+PS C:\Users\User\CASSANDRA> $ids20_raw = ($ids20 -join ",")
+PS C:\Users\User\CASSANDRA> $ids50_raw = ($ids50 -join ",")
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # === DELETE 20 ===
+PS C:\Users\User\CASSANDRA> $t = Measure-Command { docker exec -it cassandra cqlsh -e "DELETE FROM $keyspace.$table WHERE $firstHeader IN ($ids20s);" }
+PS C:\Users\User\CASSANDRA> "Tamper DELETE 20: $($t.TotalMilliseconds) ms" | Write-Host
+Tamper DELETE 20: 2876.3434 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }
+PS C:\Users\User\CASSANDRA> "Recovery DELETE 20: $($rec.TotalMilliseconds) ms" | Write-Host
+Recovery DELETE 20: 2246.9749 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $afterR = "afterrec_delete20_${csv}"
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}' WITH HEADER=TRUE;"
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   21122 rows/s; Avg. rate:   21121 rows/s
+5000 rows exported to 1 files in 0.304 seconds.
+PS C:\Users\User\CASSANDRA> docker cp cassandra:/tmp/${afterR} .
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR}" delete "$ids20_raw"
+Rows tampered: 20
+Rows recovered (present again): 20
+Rows fully correct (complete): 20
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # === DELETE 50 ===
+PS C:\Users\User\CASSANDRA> $t = Measure-Command { docker exec -it cassandra cqlsh -e "DELETE FROM $keyspace.$table WHERE $firstHeader IN ($ids50s);" }
+PS C:\Users\User\CASSANDRA> "Tamper DELETE 50: $($t.TotalMilliseconds) ms" | Write-Host
+Tamper DELETE 50: 770.4466 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> docker cp ".\${baseline}" cassandra:/tmp/${baseline}
+Successfully copied 515kB to cassandra:/tmp/baseline_employees_5k.csv
+PS C:\Users\User\CASSANDRA> $rec = Measure-Command { docker exec -it cassandra cqlsh -e "TRUNCATE $keyspace.$table; COPY $keyspace.$table FROM '/tmp/${baseline}' WITH HEADER=TRUE;" }
+PS C:\Users\User\CASSANDRA> "Recovery DELETE 50: $($rec.TotalMilliseconds) ms" | Write-Host
+Recovery DELETE 50: 1636.1283 ms
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $afterR = "afterrec_delete50_${csv}"
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "COPY $keyspace.$table TO '/tmp/${afterR}' WITH HEADER=TRUE;"
+Using 11 child processes
+
+Starting copy of hr.employees_cas with columns [employeeid, department,email, firstname, hiredate, lastname, phonenumber, position, salaryrm].
+Processed: 5000 rows; Rate:   32627 rows/s; Avg. rate:   32610 rows/s
+5000 rows exported to 1 files in 0.222 seconds.
+PS C:\Users\User\CASSANDRA> docker cp cassandra:/tmp/${afterR} .
+Successfully copied 515kB to C:\Users\User\CASSANDRA\.
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> python metrics_eval.py ".\${baseline}" ".\${afterR}" delete "$ids50_raw"
+Rows tampered: 50
+Rows recovered (present again): 50
+Rows fully correct (complete): 50
+Quality of recovered data: 100.00%
+Completeness: 100.00%
+PS C:\Users\User\CASSANDRA> # read header into a list
+PS C:\Users\User\CASSANDRA> $csv = 'employees_10k.csv'
+PS C:\Users\User\CASSANDRA> $rawHeader = Get-Content ".\${csv}" -TotalCount 1
+PS C:\Users\User\CASSANDRA> $cols = $rawHeader -split ',' | ForEach-Object { $_.Trim() }
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # sanitize to valid CQL identifiers (lowercase, underscores)
+PS C:\Users\User\CASSANDRA> $san = $cols | ForEach-Object { ($_ -replace '[^A-Za-z0-9_]', '_').ToLower() }
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $keyspace = 'hr'
+PS C:\Users\User\CASSANDRA> $table    = 'employees_cas'
+PS C:\Users\User\CASSANDRA> $firstCol = $san[0]
+PS C:\Users\User\CASSANDRA> $colsCql  = ($san | ForEach-Object { "  $_ text" }) -join ",`n"
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $cql = @"
+>> CREATE KEYSPACE IF NOT EXISTS $keyspace
+>>   WITH replication = {'class':'SimpleStrategy','replication_factor':1};
+>>
+>> DROP TABLE IF EXISTS $keyspace.$table;
+>>
+>> CREATE TABLE IF NOT EXISTS $keyspace.$table (
+>> $colsCql,
+>>   PRIMARY KEY ($firstCol)
+>> );
+>> "@
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e $cql
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "DESCRIBE TABLE $keyspace.$table;"
+
+CREATE TABLE hr.employees_cas (
+    employeeid text PRIMARY KEY,
+    department text,
+    email text,
+    firstname text,
+    hiredate text,
+    lastname text,
+    phonenumber text,
+    position text,
+    salaryrm text
+) WITH additional_write_policy = '99p'
+    AND bloom_filter_fp_chance = 0.01
+    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}
+    AND cdc = false
+    AND comment = ''
+    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}
+    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}
+    AND memtable = 'default'
+    AND crc_check_chance = 1.0
+    AND default_time_to_live = 0
+    AND extensions = {}
+    AND gc_grace_seconds = 864000
+    AND max_index_interval = 2048
+    AND memtable_flush_period_in_ms = 0
+    AND min_index_interval = 128
+    AND read_repair = 'BLOCKING'
+    AND speculative_retry = '99p';
+PS C:\Users\User\CASSANDRA> # read header into a list
+PS C:\Users\User\CASSANDRA> $csv = 'employees_10k.csv'
+PS C:\Users\User\CASSANDRA> $rawHeader = Get-Content ".\${csv}" -TotalCount 1
+PS C:\Users\User\CASSANDRA> $cols = $rawHeader -split ',' | ForEach-Object { $_.Trim() }
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> # sanitize to valid CQL identifiers (lowercase, underscores)
+PS C:\Users\User\CASSANDRA> $san = $cols | ForEach-Object { ($_ -replace '[^A-Za-z0-9_]', '_').ToLower() }
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $keyspace = 'hr'
+PS C:\Users\User\CASSANDRA> $table    = 'employees_cas'
+PS C:\Users\User\CASSANDRA> $firstCol = $san[0]
+PS C:\Users\User\CASSANDRA> $colsCql  = ($san | ForEach-Object { "  $_ text" }) -join ",`n"
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> $cql = @"
+>> CREATE KEYSPACE IF NOT EXISTS $keyspace
+>>   WITH replication = {'class':'SimpleStrategy','replication_factor':1};
+>>
+>> DROP TABLE IF EXISTS $keyspace.$table;
+>>
+>> CREATE TABLE IF NOT EXISTS $keyspace.$table (
+>> $colsCql,
+>>   PRIMARY KEY ($firstCol)
+>> );
+>> "@
+PS C:\Users\User\CASSANDRA>
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e $cql
+PS C:\Users\User\CASSANDRA> docker exec -it cassandra cqlsh -e "DESCRIBE TABLE $keyspace.$table;"
